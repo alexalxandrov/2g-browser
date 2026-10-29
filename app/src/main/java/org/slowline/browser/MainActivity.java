@@ -80,9 +80,9 @@ public final class MainActivity extends Activity implements TransferStats.Listen
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
-        getWindow().setStatusBarColor(Color.rgb(247, 248, 250));
-        getWindow().setNavigationBarColor(Color.WHITE);
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        getWindow().setStatusBarColor(Color.rgb(17, 19, 21));
+        getWindow().setNavigationBarColor(Color.rgb(17, 19, 21));
+        getWindow().getDecorView().setSystemUiVisibility(0);
 
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         trackerBlocker = new TrackerBlocker();
@@ -118,7 +118,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private void buildUi() {
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
+        root.setBackgroundColor(Color.rgb(17, 19, 21));
         if (Build.VERSION.SDK_INT >= 35) {
             root.setOnApplyWindowInsetsListener((view, insets) -> {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
@@ -131,7 +131,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
         toolbar.setPadding(dp(4), dp(5), dp(4), dp(4));
-        toolbar.setBackgroundColor(Color.rgb(247, 248, 250));
+        toolbar.setBackgroundColor(Color.rgb(27, 30, 34));
 
         backButton = toolbarButton("‹", "Назад");
         forwardButton = toolbarButton("›", "Вперёд");
@@ -143,16 +143,16 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         addressBar = new EditText(this);
         addressBar.setSingleLine(true);
         addressBar.setTextSize(14);
-        addressBar.setTextColor(Color.rgb(32, 33, 36));
-        addressBar.setHintTextColor(Color.rgb(120, 124, 130));
+        addressBar.setTextColor(Color.rgb(235, 238, 242));
+        addressBar.setHintTextColor(Color.rgb(153, 162, 172));
         addressBar.setHint("Адрес сайта или поисковый запрос");
         addressBar.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         addressBar.setImeOptions(EditorInfo.IME_ACTION_GO);
         addressBar.setPadding(dp(10), 0, dp(10), 0);
         android.graphics.drawable.GradientDrawable addressBg = new android.graphics.drawable.GradientDrawable();
-        addressBg.setColor(Color.WHITE);
+        addressBg.setColor(Color.rgb(35, 39, 44));
         addressBg.setCornerRadius(dp(8));
-        addressBg.setStroke(dp(1), Color.rgb(220, 223, 227));
+        addressBg.setStroke(dp(1), Color.rgb(65, 71, 79));
         addressBar.setBackground(addressBg);
         LinearLayout.LayoutParams addressParams = new LinearLayout.LayoutParams(0, dp(40), 1f);
         addressParams.setMargins(dp(4), 0, dp(4), 0);
@@ -192,16 +192,16 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setProgress(0);
-        progressBar.setProgressTintList(ColorStateList.valueOf(Color.rgb(89, 99, 110)));
-        progressBar.setProgressBackgroundTintList(ColorStateList.valueOf(Color.rgb(231, 234, 238)));
+        progressBar.setProgressTintList(ColorStateList.valueOf(Color.rgb(181, 194, 210)));
+        progressBar.setProgressBackgroundTintList(ColorStateList.valueOf(Color.rgb(54, 59, 66)));
         root.addView(progressBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
 
         statsText = new TextView(this);
-        statsText.setTextColor(Color.rgb(80, 86, 94));
+        statsText.setTextColor(Color.rgb(183, 191, 201));
         statsText.setTextSize(11);
         statsText.setPadding(dp(9), dp(4), dp(9), dp(5));
         statsText.setMaxLines(2);
-        statsText.setBackgroundColor(Color.rgb(250, 250, 251));
+        statsText.setBackgroundColor(Color.rgb(29, 32, 36));
         root.addView(statsText, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         webView = new WebView(this);
@@ -215,7 +215,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         button.setText(label);
         button.setTextSize(23);
         button.setGravity(Gravity.CENTER);
-        button.setTextColor(Color.rgb(55, 61, 67));
+        button.setTextColor(Color.rgb(222, 227, 234));
         button.setContentDescription(description);
         button.setBackgroundResource(android.R.drawable.list_selector_background);
         button.setFocusable(true);
@@ -246,7 +246,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         webView.setWebViewClient(new BrowserClient(resourceInterceptor, this));
         webView.setWebChromeClient(new BrowserClient.BrowserChromeClient(this));
         webView.setDownloadListener(downloadListener());
-        webView.setBackgroundColor(Color.WHITE);
+        webView.setBackgroundColor(Color.rgb(17, 19, 21));
         webView.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
     }
 
@@ -318,7 +318,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
 
     private void showStartPage() {
         String html = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
-                + "<title>Slowline Browser</title><style>body{font:16px system-ui,sans-serif;color:#202124;margin:12vh auto;padding:0 22px;max-width:620px}h1{font-size:28px;font-weight:500}p{line-height:1.6;color:#5f6368}.hint{font-size:13px;border-top:1px solid #e5e7eb;margin-top:24px;padding-top:14px}</style>"
+                + "<title>Slowline Browser</title><style>html{color-scheme:dark}body{font:16px system-ui,sans-serif;color:#e6eaf0;background:#111315;margin:12vh auto;padding:0 22px;max-width:620px}h1{font-size:28px;font-weight:500;color:#f4f6f8}p{line-height:1.6;color:#b6bec8}.hint{font-size:13px;border-top:1px solid #343a40;margin-top:24px;padding-top:14px}</style>"
                 + "</head><body><h1>Slowline Browser</h1><p>Браузер для медленных соединений. Введите адрес или поисковый запрос в поле сверху.</p>"
                 + "<p>Изображения включены. Обнаруженные ресурсы, известный размер, фактически переданные байты и объём из кэша показываются в верхней строке.</p>"
                 + "<p class='hint'>Частичное продолжение работает только для ответов, которые сервер разрешает продолжать через HTTP Range. Если сервер этого не поддерживает, браузер попробует обычную загрузку.</p></body></html>";
