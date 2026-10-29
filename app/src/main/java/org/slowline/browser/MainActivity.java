@@ -532,6 +532,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     }
 
     @Override public void onPageFinished(String url) {
+        if (isHttpUrl(url) && !isInternalStartUrl(url)) pageCache.adoptActivePage(url);
         loading = false;
         navigationPrepared = false;
         progressValue = 100;
