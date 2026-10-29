@@ -15,13 +15,15 @@ public final class TransferStats {
         public final long knownTotalBytes;
         public final long networkBytes;
         public final long cacheBytesServed;
+        public final int pendingRequests;
 
-        Snapshot(int uniqueUrls, int blockedUrls, long knownTotalBytes, long networkBytes, long cacheBytesServed) {
+        Snapshot(int uniqueUrls, int blockedUrls, long knownTotalBytes, long networkBytes, long cacheBytesServed, int pendingRequests) {
             this.uniqueUrls = uniqueUrls;
             this.blockedUrls = blockedUrls;
             this.knownTotalBytes = knownTotalBytes;
             this.networkBytes = networkBytes;
             this.cacheBytesServed = cacheBytesServed;
+            this.pendingRequests = pendingRequests;
         }
     }
 
@@ -31,6 +33,7 @@ public final class TransferStats {
     private final Map<String, Long> expectedSizes = new HashMap<>();
     private long networkBytes;
     private long cacheBytesServed;
+    private int pendingRequests;
 
     public TransferStats(Listener listener) { this.listener = listener; }
 
@@ -40,6 +43,7 @@ public final class TransferStats {
         expectedSizes.clear();
         networkBytes = 0;
         cacheBytesServed = 0;
+        pendingRequests = 0;
         publish();
     }
 
@@ -70,10 +74,20 @@ public final class TransferStats {
         publish();
     }
 
+    public synchronized void requestStarted() {
+        pendingRequests++;
+        publish();
+    }
+
+    public synchronized void requestFinished() {
+        if (pendingRequests > 0) pendingRequests--;
+        publish();
+    }
+
     public synchronized Snapshot snapshot() {
         long known = 0;
         for (Long size : expectedSizes.values()) known += Math.max(0, size);
-        return new Snapshot(urls.size(), blocked.size(), known, networkBytes, cacheBytesServed);
+        return new Snapshot(urls.size(), blocked.size(), known, networkBytes, cacheBytesServed, pendingRequests);
     }
 
     private void publish() {

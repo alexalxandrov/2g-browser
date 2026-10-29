@@ -23,6 +23,7 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.animation.LinearInterpolator;
 import android.os.Build;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
@@ -35,20 +36,27 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebSettings;
 import android.webkit.URLUtil;
-import android.widget.EditText;
+import android.widget.ArrayAdapter;
+import android.widget.AutoCompleteTextView;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.app.AlertDialog;
+import android.animation.ObjectAnimator;
+import android.animation.ValueAnimator;
 
 import java.io.UnsupportedEncodingException;
 import java.net.IDN;
 import java.net.URLEncoder;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
@@ -58,6 +66,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private static final String PREF_BLOCK_TRACKERS = "block_trackers";
     private static final String PREF_IMAGES = "images_enabled";
     private static final String PREF_THIRD_PARTY = "third_party_cookies";
+    private static final String PREF_GPRS_MODE = "gprs_text_first";
     private static final int FILE_CHOOSER_REQUEST = 1701;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -67,9 +76,13 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private ResourceInterceptor resourceInterceptor;
 
     private LinearLayout root;
-    private EditText addressBar;
+    private AutoCompleteTextView addressBar;
+    private ArrayAdapter<String> addressAdapter;
+    private final ArrayList<String> addressSuggestions = new ArrayList<>();
     private ProgressBar progressBar;
     private TextView statsText;
+    private TextView hourglass;
+    private ObjectAnimator hourglassAnimator;
     private WebView webView;
     private TextView backButton;
     private TextView forwardButton;
@@ -92,8 +105,10 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private String notice = "";
     private boolean imagesEnabled = true;
     private boolean thirdPartyCookies = false;
+    private boolean gprsMode = true;
     private ValueCallback<Uri[]> fileChooserCallback;
     private SharedPreferences preferences;
+    private BrowserStore browserStore;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -106,6 +121,8 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         trackerBlocker.setEnabled(preferences.getBoolean(PREF_BLOCK_TRACKERS, true));
         imagesEnabled = preferences.getBoolean(PREF_IMAGES, true);
         thirdPartyCookies = preferences.getBoolean(PREF_THIRD_PARTY, false);
+        gprsMode = preferences.getBoolean(PREF_GPRS_MODE, true);
+        browserStore = new BrowserStore(preferences);
         pageCache = new SinglePageCache(getFilesDir());
         transferStats = new TransferStats(this);
         resourceInterceptor = new ResourceInterceptor(pageCache, transferStats, trackerBlocker, this);
@@ -137,7 +154,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private void buildUi() {
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(17, 19, 21));
+        root.setBackgroundColor(Color.rgb(19, 22, 25));
         if (Build.VERSION.SDK_INT >= 35) {
             root.setOnApplyWindowInsetsListener((view, insets) -> {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
@@ -149,43 +166,68 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
-        toolbar.setPadding(dp(4), dp(5), dp(4), dp(4));
-        toolbar.setBackgroundColor(Color.rgb(27, 30, 34));
+        toolbar.setPadding(dp(3), dp(3), dp(3), dp(3));
+        toolbar.setBackgroundColor(Color.rgb(37, 42, 47));
 
-        backButton = toolbarButton("‹", "Назад");
-        forwardButton = toolbarButton("›", "Вперёд");
+        backButton = toolbarButton("◀", "Назад — предыдущая страница");
+        forwardButton = toolbarButton("▶", "Вперёд");
         reloadButton = toolbarButton("↻", "Обновить / остановить");
-        toolbar.addView(backButton, new LinearLayout.LayoutParams(dp(36), dp(42)));
-        toolbar.addView(forwardButton, new LinearLayout.LayoutParams(dp(36), dp(42)));
-        toolbar.addView(reloadButton, new LinearLayout.LayoutParams(dp(38), dp(42)));
+        toolbar.addView(backButton, new LinearLayout.LayoutParams(dp(34), dp(38)));
+        toolbar.addView(forwardButton, new LinearLayout.LayoutParams(dp(34), dp(38)));
+        toolbar.addView(reloadButton, new LinearLayout.LayoutParams(dp(34), dp(38)));
 
-        addressBar = new EditText(this);
+        hourglass = new TextView(this);
+        hourglass.setText("⌛");
+        hourglass.setTextSize(16);
+        hourglass.setGravity(Gravity.CENTER);
+        hourglass.setTextColor(Color.rgb(231, 192, 112));
+        hourglass.setContentDescription("Загрузка");
+        hourglass.setVisibility(View.GONE);
+        toolbar.addView(hourglass, new LinearLayout.LayoutParams(dp(22), dp(36)));
+
+        addressBar = new AutoCompleteTextView(this);
         addressBar.setSingleLine(true);
-        addressBar.setTextSize(14);
-        addressBar.setTextColor(Color.rgb(235, 238, 242));
+        addressBar.setTextSize(13);
+        addressBar.setTextColor(Color.rgb(236, 239, 242));
         addressBar.setHintTextColor(Color.rgb(153, 162, 172));
-        addressBar.setHint("Адрес сайта или поисковый запрос");
+        addressBar.setHint("Адрес / поиск");
         addressBar.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         addressBar.setImeOptions(EditorInfo.IME_ACTION_GO);
-        addressBar.setPadding(dp(10), 0, dp(10), 0);
+        addressBar.setThreshold(0);
+        addressBar.setDropDownHeight(dp(240));
+        addressBar.setDropDownVerticalOffset(dp(2));
+        addressBar.setPadding(dp(8), 0, dp(8), 0);
         android.graphics.drawable.GradientDrawable addressBg = new android.graphics.drawable.GradientDrawable();
-        addressBg.setColor(Color.rgb(35, 39, 44));
-        addressBg.setCornerRadius(dp(8));
-        addressBg.setStroke(dp(1), Color.rgb(65, 71, 79));
+        addressBg.setColor(Color.rgb(20, 23, 26));
+        addressBg.setCornerRadius(dp(2));
+        addressBg.setStroke(dp(1), Color.rgb(105, 116, 126));
         addressBar.setBackground(addressBg);
-        LinearLayout.LayoutParams addressParams = new LinearLayout.LayoutParams(0, dp(40), 1f);
-        addressParams.setMargins(dp(4), 0, dp(4), 0);
+        android.graphics.drawable.GradientDrawable dropBg = new android.graphics.drawable.GradientDrawable();
+        dropBg.setColor(Color.rgb(30, 35, 40));
+        dropBg.setCornerRadius(dp(2));
+        dropBg.setStroke(dp(1), Color.rgb(105, 116, 126));
+        addressBar.setDropDownBackgroundDrawable(dropBg);
+        addressAdapter = new ArrayAdapter<>(this, android.R.layout.simple_dropdown_item_1line, addressSuggestions);
+        addressBar.setAdapter(addressAdapter);
+        LinearLayout.LayoutParams addressParams = new LinearLayout.LayoutParams(0, dp(36), 1f);
+        addressParams.setMargins(dp(3), 0, dp(3), 0);
         toolbar.addView(addressBar, addressParams);
 
-        TextView go = toolbarButton("↵", "Перейти");
+        TextView go = toolbarButton("GO", "Перейти");
+        go.setTextSize(11);
+        go.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         go.setOnClickListener(v -> navigateFromAddressBar());
-        toolbar.addView(go, new LinearLayout.LayoutParams(dp(36), dp(42)));
+        toolbar.addView(go, new LinearLayout.LayoutParams(dp(36), dp(38)));
         TextView menu = toolbarButton("⋮", "Настройки и приватность");
         menu.setOnClickListener(this::showBrowserMenu);
-        toolbar.addView(menu, new LinearLayout.LayoutParams(dp(32), dp(42)));
+        toolbar.addView(menu, new LinearLayout.LayoutParams(dp(30), dp(38)));
 
-        backButton.setOnClickListener(v -> { if (webView != null && webView.canGoBack()) webView.goBack(); });
-        forwardButton.setOnClickListener(v -> { if (webView != null && webView.canGoForward()) webView.goForward(); });
+        backButton.setOnClickListener(v -> {
+            if (webView != null && webView.canGoBack()) webView.goBack();
+        });
+        forwardButton.setOnClickListener(v -> {
+            if (webView != null && webView.canGoForward()) webView.goForward();
+        });
         reloadButton.setOnClickListener(v -> {
             if (webView == null) return;
             if (loading) {
@@ -199,6 +241,22 @@ public final class MainActivity extends Activity implements TransferStats.Listen
                 webView.reload();
             }
         });
+        addressBar.setOnFocusChangeListener((v, hasFocus) -> {
+            if (hasFocus) {
+                refreshAddressSuggestions();
+                if (addressAdapter.getCount() > 0) addressBar.postDelayed(() -> addressBar.showDropDown(), 120L);
+            } else {
+                addressBar.dismissDropDown();
+            }
+        });
+        addressBar.setOnItemClickListener((parent, view, position, id) -> {
+            Object selected = parent.getItemAtPosition(position);
+            if (selected != null) {
+                addressBar.setText(selected.toString());
+                addressBar.setSelection(addressBar.length());
+                navigateFromAddressBar();
+            }
+        });
         addressBar.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_GO || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER)) {
                 navigateFromAddressBar();
@@ -206,26 +264,45 @@ public final class MainActivity extends Activity implements TransferStats.Listen
             }
             return false;
         });
-        root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(50)));
+        root.addView(toolbar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
 
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
         progressBar.setProgress(0);
-        progressBar.setProgressTintList(ColorStateList.valueOf(Color.rgb(181, 194, 210)));
-        progressBar.setProgressBackgroundTintList(ColorStateList.valueOf(Color.rgb(54, 59, 66)));
+        progressBar.setProgressTintList(ColorStateList.valueOf(Color.rgb(216, 176, 99)));
+        progressBar.setProgressBackgroundTintList(ColorStateList.valueOf(Color.rgb(57, 64, 71)));
         root.addView(progressBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
 
         statsText = new TextView(this);
-        statsText.setTextColor(Color.rgb(183, 191, 201));
-        statsText.setTextSize(11);
-        statsText.setPadding(dp(9), dp(4), dp(9), dp(5));
+        statsText.setTextColor(Color.rgb(189, 198, 207));
+        statsText.setTextSize(10);
+        statsText.setPadding(dp(7), dp(3), dp(7), dp(4));
         statsText.setMaxLines(2);
-        statsText.setBackgroundColor(Color.rgb(29, 32, 36));
+        statsText.setBackgroundColor(Color.rgb(27, 31, 35));
         root.addView(statsText, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         webView = new WebView(this);
         root.addView(webView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        LinearLayout footer = new LinearLayout(this);
+        footer.setOrientation(LinearLayout.HORIZONTAL);
+        footer.setGravity(Gravity.CENTER_VERTICAL);
+        footer.setPadding(dp(3), dp(2), dp(3), dp(2));
+        footer.setBackgroundColor(Color.rgb(37, 42, 47));
+        TextView history = footerButton("История");
+        history.setOnClickListener(v -> showHistoryDialog());
+        TextView bookmarks = footerButton("Закладки");
+        bookmarks.setOnClickListener(v -> showBookmarksDialog());
+        TextView addBookmark = footerButton("★");
+        addBookmark.setContentDescription("Добавить текущую страницу в закладки");
+        addBookmark.setOnClickListener(v -> addCurrentBookmark());
+        footer.addView(history, new LinearLayout.LayoutParams(0, dp(32), 1f));
+        footer.addView(bookmarks, new LinearLayout.LayoutParams(0, dp(32), 1f));
+        footer.addView(addBookmark, new LinearLayout.LayoutParams(dp(46), dp(32)));
+        root.addView(footer, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(36)));
+
         setContentView(root);
+        refreshAddressSuggestions();
         updateNavigationButtons();
     }
 
@@ -236,9 +313,35 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         button.setGravity(Gravity.CENTER);
         button.setTextColor(Color.rgb(222, 227, 234));
         button.setContentDescription(description);
-        button.setBackgroundResource(android.R.drawable.list_selector_background);
+        button.setBackground(classicButtonBackground());
         button.setFocusable(true);
         return button;
+    }
+
+    private TextView footerButton(String label) {
+        TextView button = new TextView(this);
+        button.setText(label);
+        button.setTextSize(11);
+        button.setGravity(Gravity.CENTER);
+        button.setTextColor(Color.rgb(222, 227, 234));
+        button.setBackground(classicButtonBackground());
+        button.setFocusable(true);
+        return button;
+    }
+
+    private android.graphics.drawable.Drawable classicButtonBackground() {
+        android.graphics.drawable.GradientDrawable normal = new android.graphics.drawable.GradientDrawable();
+        normal.setColor(Color.rgb(54, 62, 70));
+        normal.setCornerRadius(dp(2));
+        normal.setStroke(dp(1), Color.rgb(113, 125, 136));
+        android.graphics.drawable.GradientDrawable pressed = new android.graphics.drawable.GradientDrawable();
+        pressed.setColor(Color.rgb(77, 87, 96));
+        pressed.setCornerRadius(dp(2));
+        pressed.setStroke(dp(1), Color.rgb(190, 164, 111));
+        android.graphics.drawable.StateListDrawable states = new android.graphics.drawable.StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed}, pressed);
+        states.addState(new int[]{}, normal);
+        return states;
     }
 
     private void configureWebView() {
@@ -251,8 +354,10 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         settings.setAllowContentAccess(false);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
         settings.setSupportMultipleWindows(false);
-        settings.setLoadsImagesAutomatically(imagesEnabled); // Images remain on by default, including in data-saver mode.
-        settings.setBlockNetworkImage(false);
+        settings.setLoadsImagesAutomatically(imagesEnabled);
+        // GPRS text-first: let the document and its interface arrive before images start.
+        settings.setBlockNetworkImage(!imagesEnabled || gprsMode);
+        settings.setDefaultTextEncodingName("UTF-8");
         settings.setBuiltInZoomControls(true);
         settings.setDisplayZoomControls(false);
         settings.setSupportZoom(true);
@@ -399,6 +504,10 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         popup.getMenu().add(0, 6, 6, "Очистить cookie, историю и кэш");
         popup.getMenu().add(0, 7, 7, "О текущем кэше и ограничениях");
         popup.getMenu().add(0, 8, 8, "Настройки Private DNS Android");
+        popup.getMenu().add(0, 9, 9, "Добавить текущую страницу в закладки");
+        popup.getMenu().add(0, 10, 10, "История");
+        popup.getMenu().add(0, 11, 11, "Закладки");
+        popup.getMenu().add(0, 12, 12, (gprsMode ? "✓ " : "○ ") + "GPRS: сначала текст, затем изображения");
         popup.setOnMenuItemClickListener(this::onMenuItemClicked);
         popup.show();
     }
@@ -414,7 +523,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
                 imagesEnabled = !imagesEnabled;
                 preferences.edit().putBoolean(PREF_IMAGES, imagesEnabled).apply();
                 webView.getSettings().setLoadsImagesAutomatically(imagesEnabled);
-                webView.getSettings().setBlockNetworkImage(!imagesEnabled);
+                webView.getSettings().setBlockNetworkImage(!imagesEnabled || (gprsMode && loading));
                 Toast.makeText(this, imagesEnabled ? "Изображения включены" : "Изображения выключены", Toast.LENGTH_SHORT).show();
                 if (imagesEnabled) webView.reload();
                 return true;
@@ -450,6 +559,24 @@ public final class MainActivity extends Activity implements TransferStats.Listen
                 } catch (Exception e) {
                     Toast.makeText(this, "Откройте Настройки Android → Сеть → Private DNS", Toast.LENGTH_LONG).show();
                 }
+                return true;
+            case 9:
+                addCurrentBookmark();
+                return true;
+            case 10:
+                showHistoryDialog();
+                return true;
+            case 11:
+                showBookmarksDialog();
+                return true;
+            case 12:
+                gprsMode = !gprsMode;
+                preferences.edit().putBoolean(PREF_GPRS_MODE, gprsMode).apply();
+                if (webView != null) {
+                    webView.getSettings().setBlockNetworkImage(!imagesEnabled || gprsMode);
+                    if (isHttpUrl(webView.getUrl())) webView.reload();
+                }
+                Toast.makeText(this, gprsMode ? "GPRS: сначала текст, затем изображения" : "Обычная загрузка ресурсов", Toast.LENGTH_SHORT).show();
                 return true;
             default:
                 return false;
@@ -492,6 +619,8 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         webView.clearHistory();
         WebStorage.getInstance().deleteAllData();
         CookieManager.getInstance().removeAllCookies(success -> CookieManager.getInstance().flush());
+        browserStore.clearHistory();
+        refreshAddressSuggestions();
         transferStats.reset();
         notice = "Данные браузера очищены";
         renderStats(transferStats.snapshot());
@@ -518,14 +647,126 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         try {
             InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
             imm.hideSoftInputFromWindow(addressBar.getWindowToken(), 0);
+            addressBar.dismissDropDown();
             addressBar.clearFocus();
         } catch (Exception ignored) { }
     }
 
     private void updateNavigationButtons() {
         if (webView == null) return;
-        backButton.setAlpha(webView.canGoBack() ? 1f : 0.35f);
-        forwardButton.setAlpha(webView.canGoForward() ? 1f : 0.35f);
+        boolean canBack = webView.canGoBack();
+        boolean canForward = webView.canGoForward();
+        backButton.setAlpha(canBack ? 1f : 0.35f);
+        forwardButton.setAlpha(canForward ? 1f : 0.35f);
+        backButton.setContentDescription(canBack ? "Назад — предыдущая страница" : "Назад недоступно");
+        forwardButton.setContentDescription(canForward ? "Вперёд" : "Вперёд недоступно");
+    }
+
+    private void refreshAddressSuggestions() {
+        if (addressAdapter == null || browserStore == null) return;
+        LinkedHashSet<String> values = new LinkedHashSet<>();
+        for (BrowserStore.Entry entry : browserStore.history()) {
+            values.add(entry.url);
+            if (values.size() >= 30) break;
+        }
+        for (BrowserStore.Entry entry : browserStore.bookmarks()) {
+            values.add(entry.url);
+            if (values.size() >= 40) break;
+        }
+        addressAdapter.clear();
+        addressAdapter.addAll(values);
+        addressAdapter.notifyDataSetChanged();
+    }
+
+    private void showHistoryDialog() {
+        showSavedEntries("История посещений и поиска", browserStore.history(), false);
+    }
+
+    private void showBookmarksDialog() {
+        showSavedEntries("Закладки", browserStore.bookmarks(), true);
+    }
+
+    private void showSavedEntries(String title, List<BrowserStore.Entry> entries, boolean allowDelete) {
+        if (entries == null || entries.isEmpty()) {
+            Toast.makeText(this, allowDelete ? "Закладок пока нет" : "История пока пуста", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        ArrayList<String> labels = new ArrayList<>();
+        for (BrowserStore.Entry entry : entries) labels.add(entry.label());
+        ListView list = new ListView(this);
+        list.setDividerHeight(dp(1));
+        list.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, labels));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(list)
+                .setNegativeButton("Закрыть", null)
+                .setNeutralButton(allowDelete ? "Готово" : "Очистить историю", (d, which) -> {
+                    if (!allowDelete) {
+                        browserStore.clearHistory();
+                        refreshAddressSuggestions();
+                        Toast.makeText(this, "История очищена", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .create();
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            BrowserStore.Entry entry = entries.get(position);
+            dialog.dismiss();
+            loadBrowserEntry(entry.url);
+        });
+        if (allowDelete) {
+            list.setOnItemLongClickListener((parent, view, position, id) -> {
+                BrowserStore.Entry entry = entries.get(position);
+                new AlertDialog.Builder(this)
+                        .setTitle("Удалить закладку?")
+                        .setMessage(entry.label())
+                        .setNegativeButton("Отмена", null)
+                        .setPositiveButton("Удалить", (d, which) -> {
+                            browserStore.removeBookmark(entry.url);
+                            refreshAddressSuggestions();
+                            dialog.dismiss();
+                            showBookmarksDialog();
+                        }).show();
+                return true;
+            });
+        }
+        dialog.show();
+    }
+
+    private void loadBrowserEntry(String url) {
+        if (!isHttpUrl(url) || webView == null) return;
+        addressBar.setText(url);
+        prepareNavigation(url);
+        webView.loadUrl(url);
+    }
+
+    private void addCurrentBookmark() {
+        String url = webView == null ? null : webView.getUrl();
+        if (!isHttpUrl(url) || isInternalStartUrl(url)) {
+            Toast.makeText(this, "Откройте страницу перед добавлением закладки", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        boolean added = browserStore.addBookmark(url, webView.getTitle());
+        refreshAddressSuggestions();
+        Toast.makeText(this, added ? "Добавлено в закладки" : "Эта страница уже в закладках", Toast.LENGTH_SHORT).show();
+    }
+
+    private void updateHourglass(int pendingRequests) {
+        if (hourglass == null) return;
+        boolean active = loading || pendingRequests > 0;
+        if (active) {
+            hourglass.setVisibility(View.VISIBLE);
+            if (hourglassAnimator == null) {
+                hourglassAnimator = ObjectAnimator.ofFloat(hourglass, "rotation", 0f, 180f);
+                hourglassAnimator.setDuration(850L);
+                hourglassAnimator.setRepeatCount(ValueAnimator.INFINITE);
+                hourglassAnimator.setInterpolator(new LinearInterpolator());
+            }
+            if (!hourglassAnimator.isStarted()) hourglassAnimator.start();
+        } else {
+            if (hourglassAnimator != null) hourglassAnimator.cancel();
+            hourglass.setRotation(0f);
+            hourglass.setVisibility(View.GONE);
+        }
     }
 
     @Override public void onTopLevelNavigation(String url) {
@@ -539,6 +780,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         if (!navigationPrepared && isHttpUrl(url) && !isInternalStartUrl(url)) prepareNavigation(url);
         navigationPrepared = true;
         loading = true;
+        if (webView != null) webView.getSettings().setBlockNetworkImage(!imagesEnabled || gprsMode);
         progressValue = 0;
         progressBar.setVisibility(View.VISIBLE);
         progressBar.setProgress(0);
@@ -550,9 +792,14 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     }
 
     @Override public void onPageFinished(String url) {
-        if (isHttpUrl(url) && !isInternalStartUrl(url)) pageCache.adoptActivePage(url);
+        if (isHttpUrl(url) && !isInternalStartUrl(url)) {
+            pageCache.adoptActivePage(url);
+            browserStore.addHistory(url, webView == null ? null : webView.getTitle());
+            refreshAddressSuggestions();
+        }
         loading = false;
         navigationPrepared = false;
+        if (webView != null) webView.getSettings().setBlockNetworkImage(!imagesEnabled);
         progressValue = 100;
         progressBar.setProgress(100);
         reloadButton.setText("↻");
@@ -560,7 +807,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         updateNavigationButtons();
         renderStats(transferStats.snapshot());
         mainHandler.postDelayed(() -> {
-            if (!loading && progressBar != null) progressBar.setVisibility(View.INVISIBLE);
+            if (!loading && transferStats.snapshot().pendingRequests == 0 && progressBar != null) progressBar.setVisibility(View.INVISIBLE);
         }, 900);
     }
 
@@ -582,6 +829,11 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     @Override public void onMainFrameError(String description) {
         loading = false;
         navigationPrepared = false;
+        if (isHttpUrl(webView == null ? null : webView.getUrl())) {
+            browserStore.addHistory(webView.getUrl(), webView.getTitle());
+            refreshAddressSuggestions();
+        }
+        if (webView != null) webView.getSettings().setBlockNetworkImage(!imagesEnabled);
         reloadButton.setText("↻");
         String detail = description == null ? "Ошибка загрузки" : description;
         String current = webView == null ? null : webView.getUrl();
@@ -662,18 +914,26 @@ public final class MainActivity extends Activity implements TransferStats.Listen
 
     private void renderStats(TransferStats.Snapshot snapshot) {
         if (statsText == null || snapshot == null) return;
-        String phase = loading ? ("Документ " + progressValue + "%") : (progressValue >= 100 ? "Документ загружен" : "Ожидание");
+        String phase;
+        if (loading) phase = "Документ " + progressValue + "%";
+        else if (snapshot.pendingRequests > 0) phase = "Ресурсы: " + snapshot.pendingRequests + " в загрузке";
+        else phase = "Готово";
         String known = snapshot.knownTotalBytes > 0 ? formatBytes(snapshot.knownTotalBytes) : "неизвестен";
         String received = uidTrafficStatsAvailable ? formatBytes(pageReceivedBytes) : "недоступно";
         String rate = uidTrafficStatsAvailable ? formatBytes(receiveBytesPerSecond) + "/с" : "недоступна";
-        String value = phase + " · статических URL: " + snapshot.uniqueUrls
-                + " · известный размер статических ресурсов: " + known
-                + " · получено приложением: " + received
+        String mode = gprsMode ? "GPRS: текст сначала" : "обычный режим";
+        String value = phase + " · " + mode
+                + " · ресурсов: " + snapshot.uniqueUrls
+                + " · известный размер: " + known
+                + " · получено: " + received
                 + " · скорость: " + rate
-                + " · из кэша: " + formatBytes(snapshot.cacheBytesServed);
+                + " · кэш: " + formatBytes(snapshot.cacheBytesServed);
         if (snapshot.blockedUrls > 0) value += " · блокировано: " + snapshot.blockedUrls;
         if (notice != null && !notice.isEmpty()) value += "\n" + notice;
         statsText.setText(value);
+        updateHourglass(snapshot.pendingRequests);
+        if (loading || snapshot.pendingRequests > 0) progressBar.setVisibility(View.VISIBLE);
+        else progressBar.setVisibility(View.INVISIBLE);
     }
 
     @Override public boolean onFileChooser(ValueCallback<Uri[]> callback, WebChromeClient.FileChooserParams params) {
@@ -748,6 +1008,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
 
     @Override protected void onDestroy() {
         mainHandler.removeCallbacks(trafficSampler);
+        if (hourglassAnimator != null) hourglassAnimator.cancel();
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = null;

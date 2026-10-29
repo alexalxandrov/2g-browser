@@ -54,8 +54,8 @@ public final class ResourceInterceptor {
         this.client = new OkHttpClient.Builder()
                 .followRedirects(false)
                 .followSslRedirects(false)
-                .retryOnConnectionFailure(false)
-                .connectTimeout(60, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .connectTimeout(120, TimeUnit.SECONDS)
                 .readTimeout(10, TimeUnit.MINUTES)
                 .writeTimeout(60, TimeUnit.SECONDS)
                 .build();
@@ -244,7 +244,7 @@ public final class ResourceInterceptor {
         int code = response.code();
         String reason = safeReason(response.message(), code);
         setContentLength(headers, length);
-        return new WebResourceResponse(mime, charset, code, reason, headers, input);
+        return new WebResourceResponse(mime, charset, code, reason, headers, track(input));
     }
 
     private WebResourceResponse resumedResponse(String url, long token, SinglePageCache.Entry entry,
@@ -273,7 +273,7 @@ public final class ResourceInterceptor {
         InputStream combined = new SequenceInputStream(prefix, tail);
         if (allowCookies) applyCookies(url, response.headers());
         stats.knownSize(url, total);
-        return new WebResourceResponse(entry.mimeType, entry.charset, 200, "OK", merged, combined);
+        return new WebResourceResponse(entry.mimeType, entry.charset, 200, "OK", merged, track(combined));
     }
 
     private WebResourceResponse responseFromEntry(SinglePageCache.Entry entry, boolean countAsCache) throws IOException {
@@ -287,7 +287,32 @@ public final class ResourceInterceptor {
         // Treat reuse as recent access for the one-page cache's size-based eviction policy.
         //noinspection ResultOfMethodCallIgnored
         entry.bodyFile.setLastModified(System.currentTimeMillis());
-        return new WebResourceResponse(entry.mimeType, entry.charset, 200, "OK", headers, new FileInputStream(entry.bodyFile));
+        return new WebResourceResponse(entry.mimeType, entry.charset, 200, "OK", headers, track(new FileInputStream(entry.bodyFile)));
+    }
+
+    private InputStream track(InputStream source) {
+        stats.requestStarted();
+        return new FilterInputStream(source) {
+            private boolean finished;
+            private void finish() {
+                if (finished) return;
+                finished = true;
+                stats.requestFinished();
+            }
+            @Override public int read() throws IOException {
+                int value = super.read();
+                if (value < 0) finish();
+                return value;
+            }
+            @Override public int read(byte[] buffer, int offset, int length) throws IOException {
+                int count = super.read(buffer, offset, length);
+                if (count < 0) finish();
+                return count;
+            }
+            @Override public void close() throws IOException {
+                try { super.close(); } finally { finish(); }
+            }
+        };
     }
 
     private WebResourceResponse partialResponse(SinglePageCache.Entry entry) throws IOException {
