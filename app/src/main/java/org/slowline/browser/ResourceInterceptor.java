@@ -70,9 +70,18 @@ public final class ResourceInterceptor {
         final boolean mainFrame = request.isForMainFrame();
         final String method = request.getMethod();
         if (!"http".equalsIgnoreCase(request.getUrl().getScheme()) && !"https".equalsIgnoreCase(request.getUrl().getScheme())) return null;
+        // Main documents must stay in Chromium: OkHttp interception can break POST forms,
+        // redirects, challenge pages, content negotiation and JavaScript-heavy sites.
+        // Remove legacy incomplete document entries so they can never be replayed as a full 200.
+        if (mainFrame) {
+            cache.removeEntry(url);
+            revalidateMainDocumentOnce = false;
+            return null;
+        }
+
         stats.request(url);
 
-        if (blocker.shouldBlock(url, mainFrame)) {
+        if (blocker.shouldBlock(url, false)) {
             stats.blocked(url);
             return emptyResponse(204, "No Content");
         }
@@ -81,12 +90,16 @@ public final class ResourceInterceptor {
         // not be confused with the cache's own resume request.
         if (!"GET".equalsIgnoreCase(method) || hasHeader(request.getRequestHeaders(), "Range")) return null;
 
+        if (!isStaticResourceRequest(request)) return null;
+
         final long token = cache.generation();
         SinglePageCache.Entry entry = cache.getEntry(url);
-        // Let Chromium handle dynamic fetch/XHR, document-like and streaming requests natively.
-        // The app interceptor is for the main document and stable static assets, not every HTTP GET.
-        if (!mainFrame && !isStaticResourceRequest(request) && (entry == null || !entry.complete)) return null;
-        boolean forceRevalidate = mainFrame && revalidateMainDocumentOnce;
+        // Cache keys are exact URLs, not request-header variants.
+        if (entry != null && hasUnsafeVary(entry.headers)) {
+            cache.removeEntry(url);
+            entry = null;
+        }
+        boolean forceRevalidate = revalidateMainDocumentOnce;
         if (forceRevalidate) revalidateMainDocumentOnce = false;
 
         boolean needsValidation = entry != null && entry.complete && (forceRevalidate || requiresValidation(entry));
@@ -164,10 +177,11 @@ public final class ResourceInterceptor {
                 try { return responseFromEntry(latest, true); } catch (IOException ignored) { }
             }
             if (latest != null && latest.bodyLength() > 0 && isIdentityEncoding(latest.contentEncoding)) {
+                // Keep partial bytes for a later Range/If-Range attempt; never pretend an incomplete
+                // stylesheet, script or image is a complete HTTP 200 response.
                 if (listener != null) listener.onPartialFallback(url, latest.bodyLength(), latest.totalLength);
-                try { return partialResponse(latest); } catch (IOException ignored) { }
             }
-            if (listener != null) listener.onCacheError("Не удалось получить ресурс: " + safeHost(url) + " · передаём запрос Chromium");
+            if (listener != null) listener.onCacheError("Не удалось получить ресурс: " + safeHost(url) + " · запрос отдаётся Chromium");
             // A failed auxiliary request should not become a synthetic 504 that breaks the page.
             // Returning null lets WebView retry through its own network stack.
             return null;
@@ -313,7 +327,11 @@ public final class ResourceInterceptor {
         String vary = header(headers, "Vary");
         if (containsDirective(cacheControl, "no-store") || (vary != null && vary.trim().equals("*"))) return false;
         if (hasHeader(request.getRequestHeaders(), "Authorization")) return false;
-        if (vary != null && (vary.toLowerCase(Locale.ROOT).contains("cookie") || vary.toLowerCase(Locale.ROOT).contains("authorization"))) return false;
+        if (vary != null) {
+            String lowerVary = vary.toLowerCase(Locale.ROOT);
+            if (lowerVary.contains("cookie") || lowerVary.contains("authorization")
+                    || lowerVary.contains("accept-encoding") || lowerVary.contains("accept")) return false;
+        }
         if (request.isForMainFrame()) return true;
         String destination = header(request.getRequestHeaders(), "Sec-Fetch-Dest");
         String lowerDest = destination == null ? "" : destination.toLowerCase(Locale.ROOT);
@@ -364,6 +382,14 @@ public final class ResourceInterceptor {
         boolean modifiedDateMatches = nonEmpty(entry.lastModified) && entry.lastModified.equals(responseModified);
         // Never splice bytes from a response whose identity cannot be checked.
         return strongEtagMatches || modifiedDateMatches;
+    }
+
+    private static boolean hasUnsafeVary(Map<String, String> headers) {
+        String vary = header(headers, "Vary");
+        if (vary == null || vary.trim().isEmpty()) return false;
+        String lower = vary.toLowerCase(Locale.ROOT);
+        return lower.contains("*") || lower.contains("cookie") || lower.contains("authorization")
+                || lower.contains("accept-encoding") || lower.contains("accept");
     }
 
     private static boolean hasPositiveMaxAge(String control) {

@@ -9,10 +9,13 @@ import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.net.Uri;
+import android.net.TrafficStats;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
+import android.os.SystemClock;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -74,6 +77,18 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private boolean loading;
     private boolean navigationPrepared;
     private int progressValue;
+    private long pageReceivedBytes;
+    private long receiveBytesPerSecond;
+    private long lastUidRxBytes = -1L;
+    private long lastTrafficSampleAt;
+    private boolean uidTrafficStatsAvailable;
+
+    private final Runnable trafficSampler = new Runnable() {
+        @Override public void run() {
+            sampleAppTraffic();
+            if (webView != null) mainHandler.postDelayed(this, 1000L);
+        }
+    };
     private String notice = "";
     private boolean imagesEnabled = true;
     private boolean thirdPartyCookies = false;
@@ -98,6 +113,8 @@ public final class MainActivity extends Activity implements TransferStats.Listen
 
         buildUi();
         configureWebView();
+        resetPageTrafficCounters();
+        mainHandler.postDelayed(trafficSampler, 1000L);
 
         String launchUrl = null;
         Intent launchIntent = getIntent();
@@ -353,8 +370,9 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         navigationPrepared = true;
         boolean changed = pageCache.beginPage(url);
         if (changed) {
-            if (webView != null) webView.clearCache(true);
+            if (webView != null) webView.clearCache(true); // Discard Chromium's previous-page cache.
             transferStats.reset();
+            resetPageTrafficCounters();
             progressValue = 0;
             progressBar.setProgress(0);
         }
@@ -610,14 +628,49 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         mainHandler.post(() -> renderStats(snapshot));
     }
 
+    private void resetPageTrafficCounters() {
+        pageReceivedBytes = 0;
+        receiveBytesPerSecond = 0;
+        lastTrafficSampleAt = SystemClock.elapsedRealtime();
+        long current = TrafficStats.getUidRxBytes(Process.myUid());
+        uidTrafficStatsAvailable = current >= 0;
+        lastUidRxBytes = uidTrafficStatsAvailable ? current : -1L;
+    }
+
+    private void sampleAppTraffic() {
+        long now = SystemClock.elapsedRealtime();
+        long current = TrafficStats.getUidRxBytes(Process.myUid());
+        if (current >= 0) {
+            uidTrafficStatsAvailable = true;
+            if (lastUidRxBytes >= 0 && current >= lastUidRxBytes) {
+                long delta = current - lastUidRxBytes;
+                pageReceivedBytes += delta;
+                long elapsed = Math.max(1L, now - lastTrafficSampleAt);
+                receiveBytesPerSecond = delta * 1000L / elapsed;
+            } else {
+                receiveBytesPerSecond = 0;
+            }
+            lastUidRxBytes = current;
+        } else {
+            uidTrafficStatsAvailable = false;
+            lastUidRxBytes = -1L;
+            receiveBytesPerSecond = 0;
+        }
+        lastTrafficSampleAt = now;
+        if (statsText != null) renderStats(transferStats.snapshot());
+    }
+
     private void renderStats(TransferStats.Snapshot snapshot) {
         if (statsText == null || snapshot == null) return;
-        String phase = loading ? ("WebView " + progressValue + "%") : (progressValue >= 100 ? "Готово" : "Ожидание");
+        String phase = loading ? ("Документ " + progressValue + "%") : (progressValue >= 100 ? "Документ загружен" : "Ожидание");
         String known = snapshot.knownTotalBytes > 0 ? formatBytes(snapshot.knownTotalBytes) : "неизвестен";
-        String value = phase + " · URL-ресурсов: " + snapshot.uniqueUrls
-                + " · известный размер: " + known
-                + " · получено по сети: " + formatBytes(snapshot.networkBytes)
-                + " · выдано из кэша: " + formatBytes(snapshot.cacheBytesServed);
+        String received = uidTrafficStatsAvailable ? formatBytes(pageReceivedBytes) : "недоступно";
+        String rate = uidTrafficStatsAvailable ? formatBytes(receiveBytesPerSecond) + "/с" : "недоступна";
+        String value = phase + " · статических URL: " + snapshot.uniqueUrls
+                + " · известный размер статических ресурсов: " + known
+                + " · получено приложением: " + received
+                + " · скорость: " + rate
+                + " · из кэша: " + formatBytes(snapshot.cacheBytesServed);
         if (snapshot.blockedUrls > 0) value += " · блокировано: " + snapshot.blockedUrls;
         if (notice != null && !notice.isEmpty()) value += "\n" + notice;
         statsText.setText(value);
@@ -694,6 +747,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     }
 
     @Override protected void onDestroy() {
+        mainHandler.removeCallbacks(trafficSampler);
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = null;

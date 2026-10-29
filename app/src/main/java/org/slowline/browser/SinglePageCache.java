@@ -136,6 +136,16 @@ public final class SinglePageCache {
         } catch (IOException ignored) { }
     }
 
+    /** Delete one exact URL entry, e.g. a legacy partial HTML document that must not be replayed. */
+    public synchronized void removeEntry(String url) {
+        if (url == null || url.isEmpty()) return;
+        String key = stripFragment(url);
+        //noinspection ResultOfMethodCallIgnored
+        bodyFile(key).delete();
+        //noinspection ResultOfMethodCallIgnored
+        metaFile(key).delete();
+    }
+
     /** Clears entries but retains the current top-level URL; useful for an explicit network refresh. */
     public synchronized void clearCurrentPageResources() {
         generation++;
