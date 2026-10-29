@@ -30,15 +30,31 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          # The legacy SDK package "tools" no longer exists in Google's repository.
-          # Override the action's default package list so setup does not fail on it.
+          # The legacy SDK package "tools" no longer exists.
           packages: platform-tools
 
       - name: Accept Android SDK licences
         run: yes | sdkmanager --licenses >/dev/null || true
 
       - name: Install Android SDK packages
-        run: sdkmanager 'platforms;android-37' 'build-tools;36.0.0' 'platform-tools'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' 'platform-tools'
+
+          # Android SDK currently installs API 37 under android-37.0, while
+          # some Android Gradle Plugin versions look for platforms/android-37.
+          # Add a compatibility symlink without modifying the installed SDK.
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "$SDK_ROOT" ]]; then
+            echo "ANDROID_HOME and ANDROID_SDK_ROOT are both unset" >&2
+            exit 1
+          fi
+          if [[ -d "$SDK_ROOT/platforms/android-37.0" && ! -e "$SDK_ROOT/platforms/android-37" ]]; then
+            ln -s android-37.0 "$SDK_ROOT/platforms/android-37"
+          fi
+          test -d "$SDK_ROOT/platforms/android-37"
+          ls -ld "$SDK_ROOT/platforms/android-37" "$SDK_ROOT/build-tools/37.0.0"
 
       - name: Set up Gradle 9.6.0
         uses: gradle/actions/setup-gradle@v4
