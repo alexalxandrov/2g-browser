@@ -122,6 +122,20 @@ public final class SinglePageCache {
         return false;
     }
 
+    /**
+     * Adopt the final URL after redirects without deleting entries collected during this navigation.
+     * The next genuine top-level navigation still uses beginPage() and removes this page's cache.
+     */
+    public synchronized void adoptActivePage(String url) {
+        String key = normalizePageUrl(url);
+        if (key == null || key.equals(activePage)) return;
+        activePage = key;
+        try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(new FileOutputStream(activePageFile, false), StandardCharsets.UTF_8))) {
+            writer.write(key);
+        } catch (IOException ignored) { }
+    }
+
     /** Clears entries but retains the current top-level URL; useful for an explicit network refresh. */
     public synchronized void clearCurrentPageResources() {
         generation++;
