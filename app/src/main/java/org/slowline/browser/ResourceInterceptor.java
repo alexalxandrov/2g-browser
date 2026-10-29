@@ -44,6 +44,7 @@ public final class ResourceInterceptor {
     private final OkHttpClient client;
     private volatile boolean revalidateMainDocumentOnce;
     private volatile boolean allowThirdPartyCookies;
+    private volatile String webViewUserAgent;
 
     public ResourceInterceptor(SinglePageCache cache, TransferStats stats, TrackerBlocker blocker, Listener listener) {
         this.cache = cache;
@@ -62,6 +63,7 @@ public final class ResourceInterceptor {
 
     public void setRevalidateMainDocumentOnce() { revalidateMainDocumentOnce = true; }
     public void setAllowThirdPartyCookies(boolean allowed) { allowThirdPartyCookies = allowed; }
+    public void setUserAgent(String value) { webViewUserAgent = value; }
 
     public WebResourceResponse intercept(WebResourceRequest request) {
         final String url = request.getUrl().toString();
@@ -81,6 +83,9 @@ public final class ResourceInterceptor {
 
         final long token = cache.generation();
         SinglePageCache.Entry entry = cache.getEntry(url);
+        // Let Chromium handle dynamic fetch/XHR, document-like and streaming requests natively.
+        // The app interceptor is for the main document and stable static assets, not every HTTP GET.
+        if (!mainFrame && !isStaticResourceRequest(request) && (entry == null || !entry.complete)) return null;
         boolean forceRevalidate = mainFrame && revalidateMainDocumentOnce;
         if (forceRevalidate) revalidateMainDocumentOnce = false;
 
@@ -104,7 +109,7 @@ public final class ResourceInterceptor {
         Response response = null;
         boolean requestedRange = false;
         try {
-            Request.Builder builder = createRequest(request);
+            Request.Builder builder = createRequest(request, canResume);
             if (canResume) {
                 builder.header("Range", "bytes=" + partialLength + "-");
                 String validator = nonEmpty(entry.etag) && !entry.etag.trim().startsWith("W/")
@@ -135,7 +140,7 @@ public final class ResourceInterceptor {
                     cache.markComplete(entry);
                     return responseFromEntry(entry, true);
                 }
-                response = client.newCall(createRequest(request).build()).execute();
+                response = client.newCall(createRequest(request, false).build()).execute();
                 requestedRange = false;
             }
 
@@ -162,12 +167,14 @@ public final class ResourceInterceptor {
                 if (listener != null) listener.onPartialFallback(url, latest.bodyLength(), latest.totalLength);
                 try { return partialResponse(latest); } catch (IOException ignored) { }
             }
-            if (listener != null) listener.onCacheError("Не удалось получить ресурс: " + safeHost(url));
-            return errorResponse(mainFrame, url);
+            if (listener != null) listener.onCacheError("Не удалось получить ресурс: " + safeHost(url) + " · передаём запрос Chromium");
+            // A failed auxiliary request should not become a synthetic 504 that breaks the page.
+            // Returning null lets WebView retry through its own network stack.
+            return null;
         }
     }
 
-    private Request.Builder createRequest(WebResourceRequest request) {
+    private Request.Builder createRequest(WebResourceRequest request, boolean identityEncoding) {
         Request.Builder builder = new Request.Builder().url(request.getUrl().toString()).get();
         Map<String, String> source = request.getRequestHeaders();
         if (source != null) {
@@ -185,9 +192,13 @@ public final class ResourceInterceptor {
         String requestUrl = request.getUrl().toString();
         String cookie = allowCookiesFor(requestUrl, mainFrame) ? CookieManager.getInstance().getCookie(requestUrl) : null;
         if (nonEmpty(cookie)) builder.header("Cookie", cookie);
-        // Requesting identity encoding makes byte offsets reusable by HTTP Range. If an origin ignores
-        // this and sends compressed content, the interceptor declines to append to that partial body.
-        builder.header("Accept-Encoding", "identity");
+        // Use the actual WebView/Chromium user agent. OkHttp's default okhttp/4.x UA can trigger
+        // reduced/blocked responses on large sites and their CDNs.
+        String ua = webViewUserAgent;
+        if (nonEmpty(ua)) builder.header("User-Agent", ua);
+        // Only force identity encoding when continuing an incomplete byte range. For ordinary
+        // requests OkHttp may transparently decompress gzip without confusing byte offsets.
+        if (identityEncoding) builder.header("Accept-Encoding", "identity");
         return builder;
     }
 
@@ -205,7 +216,9 @@ public final class ResourceInterceptor {
 
         boolean cacheable = isCacheable(request, response, mime, headers);
         if (cacheable && response.code() >= 200 && response.code() < 300 && response.code() != 204 && response.code() != 206) {
-            boolean ranges = supportsRanges(headers, response.header("ETag"), response.header("Last-Modified"))
+            // Only enable byte-resume when the original representation has a known byte length.
+            // OkHttp may transparently decompress gzip responses, making their original offsets invalid.
+            boolean ranges = length >= 0 && supportsRanges(headers, response.header("ETag"), response.header("Last-Modified"))
                     && isIdentityEncoding(response.header("Content-Encoding"));
             SinglePageCache.CacheWrite write = cache.startWrite(url, token, null, mime, charset, headers,
                     length, false, ranges, response.header("Content-Encoding"));
@@ -270,6 +283,29 @@ public final class ResourceInterceptor {
         setContentLength(headers, entry.bodyLength());
         if (listener != null) listener.onPartialFallback(entry.url, entry.bodyLength(), entry.totalLength);
         return new WebResourceResponse(entry.mimeType, entry.charset, 200, "OK", headers, new FileInputStream(entry.bodyFile));
+    }
+
+    private static boolean isStaticResourceRequest(WebResourceRequest request) {
+        Map<String, String> headers = request.getRequestHeaders();
+        String destination = header(headers, "Sec-Fetch-Dest");
+        if (destination != null) {
+            String dest = destination.trim().toLowerCase(Locale.ROOT);
+            if (dest.equals("image") || dest.equals("style") || dest.equals("script")
+                    || dest.equals("font") || dest.equals("audio") || dest.equals("video")
+                    || dest.equals("track")) return true;
+            if (dest.equals("document") || dest.equals("iframe") || dest.equals("empty")
+                    || dest.equals("worker") || dest.equals("sharedworker")) return false;
+        }
+        String accept = header(headers, "Accept");
+        if (accept != null) {
+            String a = accept.toLowerCase(Locale.ROOT);
+            if (a.contains("text/css") || a.contains("image/") || a.contains("font/")
+                    || a.contains("javascript") || a.contains("ecmascript")) return true;
+        }
+        String path = request.getUrl().getPath();
+        if (path == null) return false;
+        String p = path.toLowerCase(Locale.ROOT);
+        return p.matches(".*\\.(?:css|js|mjs|png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot|mp3|m4a|ogg|opus|wav|mp4|webm|vtt)$");
     }
 
     private boolean isCacheable(WebResourceRequest request, Response response, String mime, Map<String, String> headers) {
