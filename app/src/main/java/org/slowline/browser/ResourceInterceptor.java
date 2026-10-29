@@ -152,7 +152,7 @@ public final class ResourceInterceptor {
                     return resumedResponse(url, token, entry, response, range, allowCookiesFor(url, mainFrame));
                 }
                 response.close();
-                response = client.newCall(createRequest(request).build()).execute();
+                response = client.newCall(createRequest(request, false).build()).execute();
                 requestedRange = false;
             }
 
