@@ -42,6 +42,7 @@ import android.widget.Toast;
 import android.app.AlertDialog;
 
 import java.io.UnsupportedEncodingException;
+import java.net.IDN;
 import java.net.URLEncoder;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -71,6 +72,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private TextView forwardButton;
     private TextView reloadButton;
     private boolean loading;
+    private boolean navigationPrepared;
     private int progressValue;
     private String notice = "";
     private boolean imagesEnabled = true;
@@ -224,6 +226,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
 
     private void configureWebView() {
         WebSettings settings = webView.getSettings();
+        resourceInterceptor.setUserAgent(settings.getUserAgentString());
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setDatabaseEnabled(false);
@@ -288,14 +291,17 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     private String normalizeAddress(String input) {
         String value = input == null ? "" : input.trim();
         if (value.isEmpty()) return null;
+
+        // Explicit HTTP(S) addresses always win; they must never be sent to search.
         if (value.matches("(?i)^https?://.*")) return value;
-        boolean hostWithPort = value.matches("(?i)^(localhost|[a-z0-9.-]+|\\[[0-9a-f:]+\\]):\\d+(/.*)?$");
-        if (value.matches("(?i)^[a-z][a-z0-9+.-]*:.*") && !hostWithPort) {
+
+        boolean looksLikeHost = looksLikeWebAddress(value);
+        if (value.matches("(?i)^[a-z][a-z0-9+.-]*:.*") && !looksLikeHost) {
             Toast.makeText(this, "Разрешены только HTTP и HTTPS-адреса", Toast.LENGTH_LONG).show();
             return null;
         }
-        boolean looksLikeHost = value.contains(".") || value.equalsIgnoreCase("localhost") || value.startsWith("[") || hostWithPort;
-        if (looksLikeHost && !value.contains(" ")) return "https://" + value;
+        if (looksLikeHost) return "https://" + value;
+
         try {
             return "https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(value, "UTF-8");
         } catch (UnsupportedEncodingException e) {
@@ -303,8 +309,48 @@ public final class MainActivity extends Activity implements TransferStats.Listen
         }
     }
 
+    private boolean looksLikeWebAddress(String value) {
+        if (value == null || value.isEmpty() || value.matches(".*\\s+.*")) return false;
+        String authority = value.split("[/?#]", 2)[0];
+        if (authority.isEmpty() || authority.contains("@")) return false;
+
+        // Bracketed IPv6 literal, optionally with a port.
+        if (authority.startsWith("[")) {
+            int close = authority.indexOf(']');
+            if (close <= 1) return false;
+            String suffix = authority.substring(close + 1);
+            return suffix.isEmpty() || suffix.matches(":\\d{1,5}");
+        }
+
+        String host = authority;
+        int colon = host.lastIndexOf(':');
+        if (colon >= 0) {
+            String port = host.substring(colon + 1);
+            if (!port.matches("\\d{1,5}")) return false;
+            host = host.substring(0, colon);
+        }
+        if (host.equalsIgnoreCase("localhost")) return true;
+        if (host.matches("\\d{1,3}(?:\\.\\d{1,3}){3}")) return true;
+
+        try {
+            if (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+            host = IDN.toASCII(host, IDN.USE_STD3_ASCII_RULES);
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        if (!host.contains(".")) return false;
+        String[] labels = host.split("\\.", -1);
+        if (labels.length < 2) return false;
+        for (String label : labels) {
+            if (label.isEmpty() || label.length() > 63 || label.startsWith("-") || label.endsWith("-")) return false;
+            if (!label.matches("[A-Za-z0-9-]+")) return false;
+        }
+        return labels[labels.length - 1].length() >= 2;
+    }
+
     private void prepareNavigation(String url) {
         if (!isHttpUrl(url) || isInternalStartUrl(url)) return;
+        navigationPrepared = true;
         boolean changed = pageCache.beginPage(url);
         if (changed) {
             if (webView != null) webView.clearCache(true);
@@ -470,7 +516,10 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     }
 
     @Override public void onPageStarted(String url) {
-        if (isHttpUrl(url) && !isInternalStartUrl(url)) prepareNavigation(url);
+        // Do not treat an HTTP redirect as a new page and erase in-flight cache files.
+        // Back/forward navigation still prepares a fresh active page here.
+        if (!navigationPrepared && isHttpUrl(url) && !isInternalStartUrl(url)) prepareNavigation(url);
+        navigationPrepared = true;
         loading = true;
         progressValue = 0;
         progressBar.setVisibility(View.VISIBLE);
@@ -484,6 +533,7 @@ public final class MainActivity extends Activity implements TransferStats.Listen
 
     @Override public void onPageFinished(String url) {
         loading = false;
+        navigationPrepared = false;
         progressValue = 100;
         progressBar.setProgress(100);
         reloadButton.setText("↻");
@@ -496,18 +546,23 @@ public final class MainActivity extends Activity implements TransferStats.Listen
     }
 
     @Override public void onProgressChanged(int progress) {
-        progressValue = progress;
         if (progress < 100) {
             loading = true;
+            progressValue = progress;
             progressBar.setVisibility(View.VISIBLE);
             reloadButton.setText("×");
+        } else {
+            // WebView progress is for the main frame, not every outstanding subresource.
+            // Hold below 100 until onPageFinished is called.
+            progressValue = loading ? 97 : 100;
         }
-        progressBar.setProgress(progress);
+        progressBar.setProgress(progressValue);
         renderStats(transferStats.snapshot());
     }
 
     @Override public void onMainFrameError(String description) {
         loading = false;
+        navigationPrepared = false;
         reloadButton.setText("↻");
         String detail = description == null ? "Ошибка загрузки" : description;
         String current = webView == null ? null : webView.getUrl();
